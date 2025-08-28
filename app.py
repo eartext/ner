@@ -12,10 +12,12 @@ _models: Dict[str, "spacy.Language"] = {}
 _lock = threading.Lock()
 
 MODEL_BY_LANG = {
-    "sv": "sv_core_news_sm",   # Sueco
-    "es": "es_core_news_sm",   # Español
-    "pl": "pl_core_news_sm",   # Polaco
+    "sv": "sv_core_news_lg",
+    "es": "es_core_news_lg",
+    "pl": "pl_core_news_sm",   # Polaco (no hay lg)
 }
+# y en el comentario del lang:
+# "sv" | "es" | "pl"
 
 def get_model(lang: str):
     lang = (lang or "").strip().lower()
@@ -43,8 +45,11 @@ def cut_excerpt(txt: str, start: int, end: int, win: int = 100) -> Tuple[str, st
 
 # Etiquetas que queremos incluir como "palabras" (entidades con nombre)
 NAMED_ENTITY_LABELS = (
-    "PERSON", "ORG", "GPE", "LOC", "NORP", "FAC", "WORK_OF_ART", "EVENT",
-    "PRODUCT", "LANGUAGE", "PER", "MISC"
+    # “universales / español”
+    "PERSON","ORG","GPE","LOC","NORP","FAC","WORK_OF_ART","EVENT",
+    "PRODUCT","LANGUAGE","PER",
+    # “sueco”
+    "PRS","TME","MSR","EVN","WRK","OBJ"
 )
 
 # Números con millares y decimales en formatos europeos y anglosajones
@@ -73,9 +78,15 @@ def ner(
         for ent in doc.ents:
             if ent.label_ in NAMED_ENTITY_LABELS:
                 label = ent.label_
-                # Unificamos GPE (geo-político) en LOC (lugar), para simplificar la salida
                 if label == "GPE":
                     label = "LOC"
+                if label in ("PER", "PRS"):
+                    label = "PERSON"
+                if label == "WRK":
+                    label = "WORK_OF_ART"
+                if label == "EVN":
+                    label = "EVENT"
+                    # (MSR y TME puedes dejarlas tal cual; son “measurement/time” y te vendrán bien)
                 spans.append({
                     "text": ent.text,
                     "type": label,
@@ -136,3 +147,11 @@ def ner(
         "summary": summary,          # para la tabla principal
         "occurrences": occurrences   # solo si include_all=true
     }
+@app.post("/reset")
+def reset_models():
+    global _models
+    with _lock:
+        cnt = len(_models)
+        _models.clear()
+    import gc; gc.collect()
+    return {"ok": True, "cleared": cnt}
