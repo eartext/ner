@@ -49,61 +49,57 @@ NAMED_ENTITY_LABELS = (
     "PRODUCT","LANGUAGE","PER","PRS","TME","MSR","EVN","WRK","OBJ"
 )
 
-# ===== Regex por idioma =====
+# ===== Regex por idioma (con tipo: DATE, TIME, MONEY, PERCENT, NUMBER) =====
 REGEX_BY_LANG = {
     "es": [
-        # Fechas/horas primero
-        re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"),
-        re.compile(r"\b\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+\d{4}\b", re.IGNORECASE),
-        re.compile(r"\b\d{1,2}:\d{2}\b"),
-        # Divisas y %
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"),
-        # Miles estrictos
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"),
-        # Genérico
-        re.compile(r"\b\d+(?:[.,]\d+)?\b"),
+        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),                              # 23/09/2024, 01-01-2025, 15.03.2026
+        (re.compile(r"\b\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+\d{4}\b", re.IGNORECASE), "DATE"),       # 14 de febrero de 2021
+        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),                                               # 08:30, 17:45
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:€|eur|euros?)", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:€|eur|euros?)", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),                    # 1.234.567,89 | 1.234.567.89
+        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),                                           # 123 | 3,7 | 6.0
     ],
     "sv": [
-        re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"),
-        re.compile(r"\b\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4}\b"),
-        re.compile(r"\b\d{1,2}:\d{2}\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"),
-        re.compile(r"\b\d+(?:[.,]\d+)?\b"),
+        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
+        (re.compile(r"\b\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4}\b"), "DATE"),                           # 14 februari 2021
+        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
     "da": [
-        re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"),
-        re.compile(r"\b\d{1,2}\.\s+[A-Za-zæøåÆØÅ]+\s+\d{4}\b"),
-        re.compile(r"\b\d{1,2}:\d{2}\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"),
-        re.compile(r"\b\d+(?:[.,]\d+)?\b"),
+        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
+        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zæøåÆØÅ]+\s+\d{4}\b"), "DATE"),                         # 14. februar 2021
+        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
     "fi": [
-        re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"),
-        re.compile(r"\b\d{1,2}\.\s+[A-Za-zäöÄÖ]+\s+\d{4}\b"),
-        re.compile(r"\b\d{1,2}:\d{2}\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*€\b"),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*€\b"),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"),
-        re.compile(r"\b\d+(?:[.,]\d+)?\b"),
+        (re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"), "DATE"),                                   # 23.09.2024
+        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zäöÄÖ]+\s+\d{4}\b"), "DATE"),                           # 14. helmikuuta 2021
+        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*€"), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*€"), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
     "pl": [
-        re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"),
-        re.compile(r"\b\d{1,2}\s+[A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ]+\s+\d{4}\b"),
-        re.compile(r"\b\d{1,2}:\d{2}\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE),
-        re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"),
-        re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"),
-        re.compile(r"\b\d+(?:[.,]\d+)?\b"),
+        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
+        (re.compile(r"\b\d{1,2}\s+[A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ]+\s+\d{4}\b"), "DATE"),               # 14 lutego 2021
+        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
 }
 
@@ -122,13 +118,54 @@ def ner(
     doc = nlp(txt)
 
     spans: List[Dict] = []
-    seen_spans = set()  # para deduplicar por (start, end, type)
 
-    # ---- Entidades del modelo ----
+    # --- util para añadir spans con resolución de solapamientos ---
+    PRIORITY = {"MONEY": 3, "DATE": 3, "TIME": 3, "PERCENT": 3, "NUMBER": 1}
+    # lo no numérico del NER (PERSON/ORG/LOC...) les damos prioridad 2
+    def _prio(t: str) -> int:
+        return PRIORITY.get(t, 2)
+
+    def add_span(start: int, end: int, typ: str, text: str):
+        """Inserta un span resolviendo solapamientos:
+           - Si solapa con otro y tiene mayor prioridad, reemplaza al existente.
+           - Si misma prioridad y este es más largo, reemplaza al existente.
+           - Si peor, se descarta.
+        """
+        i = 0
+        while i < len(spans):
+            s = spans[i]
+            a, b = start, end
+            c, d = s["start"], s["end"]
+
+            overlap = not (b <= c or a >= d)
+            if overlap:
+                p_new = _prio(typ)
+                p_old = _prio(s["type"])
+
+                replace = False
+                if p_new > p_old:
+                    replace = True
+                elif p_new == p_old and (end - start) > (d - c):
+                    replace = True
+
+                if replace:
+                    spans.pop(i)
+                    # no incrementamos i; reevaluamos contra los restantes
+                    continue
+                else:
+                    # el existente gana: no añadimos este
+                    return
+            i += 1
+
+        # si llega aquí, no hubo bloqueos => añadimos
+        spans.append({"text": text, "type": typ, "start": start, "end": end})
+
+    # ---- Entidades del modelo (personas, orgs, etc.) ----
     if include_words:
         for ent in doc.ents:
             if ent.label_ in NAMED_ENTITY_LABELS:
                 label = ent.label_
+                # Normalizaciones entre modelos
                 if label == "GPE":
                     label = "LOC"
                 if label in ("PER", "PRS"):
@@ -137,40 +174,21 @@ def ner(
                     label = "WORK_OF_ART"
                 if label == "EVN":
                     label = "EVENT"
-
-                key = (ent.start_char, ent.end_char, label)
-                if key in seen_spans:
-                    continue
-                seen_spans.add(key)
-
-                spans.append({
-                    "text": ent.text,
-                    "type": label,
-                    "start": ent.start_char,
-                    "end": ent.end_char
-                })
+                add_span(ent.start_char, ent.end_char, label, ent.text)
 
     # ---- Números/fechas/porcentajes/divisas por regex ----
     if include_numbers:
-        for regex in REGEX_BY_LANG.get(req.lang, []):
+        for regex, rtype in REGEX_BY_LANG.get(req.lang, []):
             for m in regex.finditer(txt):
                 val = m.group(0)
 
                 # Evitar “000”, “000.000”, “0 000,00”, etc. (solo ceros y separadores)
-                if re.fullmatch(r"[0\s]+(?:[.,][0\s]+)?", val):
+                if rtype in ("NUMBER", "MONEY", "PERCENT") and re.fullmatch(r"[0\s]+(?:[.,][0\s]+)?", val):
                     continue
 
-                key = (m.start(), m.end(), "NUMBER")
-                if key in seen_spans:
-                    continue
-                seen_spans.add(key)
-
-                spans.append({
-                    "text": val,
-                    "type": "NUMBER",
-                    "start": m.start(),
-                    "end": m.end()
-                })
+                # Para la salida, mantenemos el tipo específico si lo hay; si no, NUMBER
+                out_type = rtype if rtype in ("DATE", "TIME", "MONEY", "PERCENT") else "NUMBER"
+                add_span(m.start(), m.end(), out_type, val)
 
     # ---- Agrupación por (texto, tipo) ----
     groups: Dict[Tuple[str, str], Dict] = {}
