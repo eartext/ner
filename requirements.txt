@@ -2,6 +2,8 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 spacy==3.7.5
 numpy<2.0.0
+blis==0.7.11
+thinc==8.2.5
 https://github.com/explosion/spacy-models/releases/download/sv_core_news_sm-3.7.0/sv_core_news_sm-3.7.0.tar.gz
 https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0.tar.gz
 https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz
