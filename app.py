@@ -23,7 +23,7 @@ def get_model(lang: str):
         raise HTTPException(400, f"Unsupported lang: {lang}")
     with _lock:
         if lang not in _models:
-            nlp = spacy.load(MODEL_BY_LANG[lang], disable=["lemmatizer","textcat"])
+            nlp = spacy.load(MODEL_BY_LANG[lang], disable=["lemmatizer", "textcat"])
             if "ner" not in nlp.pipe_names:
                 raise HTTPException(500, f"NER pipe not available for {lang}")
             _models[lang] = nlp
@@ -41,8 +41,13 @@ def cut_excerpt(txt: str, start: int, end: int, win: int = 100) -> Tuple[str, st
     post = txt[end:e]
     return pre, mid, post
 
-NAMED_ENTITY_LABELS = ("PERSON","ORG","GPE","LOC","NORP","FAC","WORK_OF_ART","EVENT")
+# Etiquetas que queremos incluir como "palabras" (entidades con nombre)
+NAMED_ENTITY_LABELS = (
+    "PERSON", "ORG", "GPE", "LOC", "NORP", "FAC", "WORK_OF_ART", "EVENT",
+    "PRODUCT", "LANGUAGE", "PER", "MISC"
+)
 
+# Números con millares y decimales en formatos europeos y anglosajones
 NUMBER_REGEX = re.compile(
     r"\b\d{1,3}(?:[.\s]\d{3})*(?:[.,]\d+)?\b|\b\d+(?:[.,]\d+)?\b"
 )
@@ -67,9 +72,13 @@ def ner(
     if include_words:
         for ent in doc.ents:
             if ent.label_ in NAMED_ENTITY_LABELS:
+                label = ent.label_
+                # Unificamos GPE (geo-político) en LOC (lugar), para simplificar la salida
+                if label == "GPE":
+                    label = "LOC"
                 spans.append({
                     "text": ent.text,
-                    "type": ent.label_,
+                    "type": label,
                     "start": ent.start_char,
                     "end": ent.end_char
                 })
@@ -84,13 +93,13 @@ def ner(
             })
 
     # 2) Agregar por (texto exacto + tipo)
-    groups: Dict[Tuple[str,str], Dict] = {}
+    groups: Dict[Tuple[str, str], Dict] = {}
     for s in spans:
         key = (s["text"], s["type"])  # si quisieras unificar mayúsculas: (s["text"].casefold(), s["type"])
         if key not in groups:
             pre, mid, post = cut_excerpt(txt, s["start"], s["end"], win=100)
             groups[key] = {
-                "text": s["text"],        # conserva tal cual el primer visto
+                "text": s["text"],        # conserva tal cual el primero visto
                 "type": s["type"],
                 "count": 0,
                 "first_excerpt": {"pre": pre, "match": mid, "post": post},
