@@ -55,9 +55,9 @@ REGEX_BY_LANG = {
         (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),                              # 23/09/2024, 01-01-2025, 15.03.2026
         (re.compile(r"\b\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+\d{4}\b", re.IGNORECASE), "DATE"),       # 14 de febrero de 2021
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),                                               # 08:30, 17:45
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:€|eur|euros?)", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:€|eur|euros?)", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),                    # 1.234.567,89 | 1.234.567.89
         (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),                                           # 123 | 3,7 | 6.0
     ],
@@ -67,7 +67,7 @@ REGEX_BY_LANG = {
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
@@ -77,7 +77,7 @@ REGEX_BY_LANG = {
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
@@ -85,9 +85,9 @@ REGEX_BY_LANG = {
         (re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"), "DATE"),                                   # 23.09.2024
         (re.compile(r"\b\d{1,2}\.\s+[A-Za-zäöÄÖ]+\s+\d{4}\b"), "DATE"),                           # 14. helmikuuta 2021
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*€"), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*€"), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*€\b"), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*€\b"), "MONEY"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
@@ -97,7 +97,7 @@ REGEX_BY_LANG = {
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%"), "PERCENT"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
@@ -182,11 +182,18 @@ def ner(
             for m in regex.finditer(txt):
                 val = m.group(0)
 
-                # Evitar “000”, “000.000”, “0 000,00”, etc. (solo ceros y separadores)
-                if rtype in ("NUMBER", "MONEY", "PERCENT") and re.fullmatch(r"[0\s]+(?:[.,][0\s]+)?", val):
-                    continue
+                 # --- filtro "solo ceros" robusto ---
+                if rtype in ("NUMBER", "MONEY", "PERCENT"):
+                    # quita unidad monetaria o % al final (con posible espacio antes)
+                    stripped = re.sub(r"\s*(€|eur|euros?|kr|sek|dkk|zł|pln|pln\.?)\s*$", "", val, flags=re.IGNORECASE)
+                    stripped = re.sub(r"\s*%\s*$", "", stripped)
+                    # elimina espacios duros y separadores para evaluar el núcleo numérico
+                    core = stripped.replace("\u00A0", " ")  # NBSP -> espacio normal
+                    core = core.replace(" ", "").replace(".", "").replace(",", "")
+                    if re.fullmatch(r"0+", core or ""):
+                        # ej. "000", "000.000", "0 000,00", "000.000 kr", "0,00 %", etc.
+                        continue
 
-                # Para la salida, mantenemos el tipo específico si lo hay; si no, NUMBER
                 out_type = rtype if rtype in ("DATE", "TIME", "MONEY", "PERCENT") else "NUMBER"
                 add_span(m.start(), m.end(), out_type, val)
 
