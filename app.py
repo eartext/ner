@@ -5,34 +5,69 @@ import threading
 import re
 from typing import Dict, List, Tuple
 
-app = FastAPI(title="Eartext NER (sv/es/pl)")
+import os
+import time
+import psutil
 
-# ===== Cache de modelos =====
+from importlib.metadata import version as pkg_version, PackageNotFoundError
+
+app = FastAPI(title="Eartext NER")
+START_TIME = time.time()
+# ===== Model cache (thread-safe) =====
 _models: Dict[str, "spacy.Language"] = {}
 _lock = threading.Lock()
 
-MODEL_BY_LANG = {
-    "sv": "sv_core_news_lg",   # Sueco grande
-    "es": "es_core_news_lg",   # Español grande
-    "pl": "pl_core_news_sm",   # Polaco (no hay lg)
+# === spaCy model per language (must be installed in the environment) ===
+MODEL_BY_LANG: Dict[str, str] = {
+    "es": "es_core_news_lg",  # Español
+    "sv": "sv_core_news_lg",  # Sueco
+    "da": "da_core_news_lg",  # Danés
+    "fi": "fi_core_news_lg",  # Finés
+    "en": "en_core_web_lg",   # Inglés
+    "nl": "nl_core_news_lg",  # Neerlandés
+    "pl": "pl_core_news_sm",  # Polaco (no hay lg oficial)
+    "pt": "pt_core_news_lg",  # Portugués (Brasil)
+    # Si añades más, inclúyelos aquí y, si quieres, añade regex abajo.
 }
-# Idiomas aceptados en la petición: "sv" | "es" | "pl"
+
+SUPPORTED_LANGS = set(MODEL_BY_LANG.keys())
 
 def get_model(lang: str):
     lang = (lang or "").strip().lower()
-    if lang not in MODEL_BY_LANG:
-        raise HTTPException(400, f"Unsupported lang: {lang}")
+    if lang not in SUPPORTED_LANGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported lang='{lang}'. Supported: {sorted(SUPPORTED_LANGS)}"
+        )
     with _lock:
         if lang not in _models:
             nlp = spacy.load(MODEL_BY_LANG[lang], disable=["lemmatizer", "textcat"])
             if "ner" not in nlp.pipe_names:
-                raise HTTPException(500, f"NER pipe not available for {lang}")
+                raise HTTPException(500, f"NER pipe not available for '{lang}'")
             _models[lang] = nlp
     return _models[lang]
 
+def resolved_model_name(nlp: "spacy.Language", lang: str) -> Tuple[str, str]:
+    """
+    Devuelve (model_full_name, model_version).
+    Intenta construir p.ej. 'es_core_news_lg' desde meta+lang;
+    si no puede, cae al nombre del mapping (MODEL_BY_LANG[lang]).
+    """
+    try:
+        meta = getattr(nlp, "meta", {}) or {}
+        pkg_name = meta.get("name")  # suele ser 'core_news_lg'
+        version = meta.get("version") or ""
+        lang_code = getattr(nlp, "lang", None) or lang
+        if pkg_name and lang_code:
+            return f"{lang_code}_{pkg_name}", version
+    except Exception:
+        pass
+    # Fallback: lo que cargamos desde el mapping
+    return MODEL_BY_LANG.get(lang, f"{lang}_unknown"), ""
+
 class NerRequest(BaseModel):
     text: str
-    lang: str  # "sv" | "es" | "pl"
+    lang: str  # e.g. "es" | "sv" | "da" | "fi" | "en" | "nl" | "pl"
 
 def cut_excerpt(txt: str, start: int, end: int, win: int = 100) -> Tuple[str, str, str]:
     s = max(0, start - win)
@@ -42,28 +77,27 @@ def cut_excerpt(txt: str, start: int, end: int, win: int = 100) -> Tuple[str, st
     post = txt[end:e]
     return pre, mid, post
 
-# ===== Etiquetas de entidades que sí mostramos =====
-# Normalizamos algunas (GPE->LOC, PER/PRS->PERSON, WRK->WORK_OF_ART, EVN->EVENT).
+# ===== Entity labels we keep (normalized across models) =====
 NAMED_ENTITY_LABELS = (
     "PERSON","ORG","GPE","LOC","NORP","FAC","WORK_OF_ART","EVENT",
     "PRODUCT","LANGUAGE","PER","PRS","TME","MSR","EVN","WRK","OBJ"
 )
 
-# ===== Regex por idioma (con tipo: DATE, TIME, MONEY, PERCENT, NUMBER) =====
+# ===== Regex per language (DATE, TIME, MONEY, PERCENT, NUMBER) =====
 REGEX_BY_LANG = {
     "es": [
-        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),                              # 23/09/2024, 01-01-2025, 15.03.2026
-        (re.compile(r"\b\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+\d{4}\b", re.IGNORECASE), "DATE"),       # 14 de febrero de 2021
-        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),                                               # 08:30, 17:45
+        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
+        (re.compile(r"\b\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+\d{4}\b", re.IGNORECASE), "DATE"),
+        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),                    # 1.234.567,89 | 1.234.567.89
-        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),                                           # 123 | 3,7 | 6.0
+        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
+        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
     "sv": [
         (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4}\b"), "DATE"),                           # 14 februari 2021
+        (re.compile(r"\b\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4}\b"), "DATE"),
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
@@ -73,7 +107,7 @@ REGEX_BY_LANG = {
     ],
     "da": [
         (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zæøåÆØÅ]+\s+\d{4}\b"), "DATE"),                         # 14. februar 2021
+        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zæøåÆØÅ]+\s+\d{4}\b"), "DATE"),
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
@@ -82,8 +116,8 @@ REGEX_BY_LANG = {
         (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
     ],
     "fi": [
-        (re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"), "DATE"),                                   # 23.09.2024
-        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zäöÄÖ]+\s+\d{4}\b"), "DATE"),                           # 14. helmikuuta 2021
+        (re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"), "DATE"),
+        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zäöÄÖ]+\s+\d{4}\b"), "DATE"),
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*€\b"), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*€\b"), "MONEY"),
@@ -93,7 +127,7 @@ REGEX_BY_LANG = {
     ],
     "pl": [
         (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\s+[A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ]+\s+\d{4}\b"), "DATE"),               # 14 lutego 2021
+        (re.compile(r"\b\d{1,2}\s+[A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ]+\s+\d{4}\b"), "DATE"),
         (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
         (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
         (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
@@ -114,23 +148,19 @@ def ner(
     if not txt:
         raise HTTPException(400, "Empty text")
 
-    nlp = get_model(req.lang)
+    lang = (req.lang or "").strip().lower()
+    nlp = get_model(lang)
+    model_full_name, model_version = resolved_model_name(nlp, lang)
     doc = nlp(txt)
 
     spans: List[Dict] = []
 
-    # --- util para añadir spans con resolución de solapamientos ---
+    # --- priority for overlap resolution ---
     PRIORITY = {"MONEY": 3, "DATE": 3, "TIME": 3, "PERCENT": 3, "NUMBER": 1}
-    # lo no numérico del NER (PERSON/ORG/LOC...) les damos prioridad 2
     def _prio(t: str) -> int:
-        return PRIORITY.get(t, 2)
+        return PRIORITY.get(t, 2)  # NER words -> 2
 
     def add_span(start: int, end: int, typ: str, text: str):
-        """Inserta un span resolviendo solapamientos:
-           - Si solapa con otro y tiene mayor prioridad, reemplaza al existente.
-           - Si misma prioridad y este es más largo, reemplaza al existente.
-           - Si peor, se descarta.
-        """
         i = 0
         while i < len(spans):
             s = spans[i]
@@ -150,22 +180,18 @@ def ner(
 
                 if replace:
                     spans.pop(i)
-                    # no incrementamos i; reevaluamos contra los restantes
                     continue
                 else:
-                    # el existente gana: no añadimos este
                     return
             i += 1
 
-        # si llega aquí, no hubo bloqueos => añadimos
         spans.append({"text": text, "type": typ, "start": start, "end": end})
 
-    # ---- Entidades del modelo (personas, orgs, etc.) ----
+    # ---- NER entities ----
     if include_words:
         for ent in doc.ents:
             if ent.label_ in NAMED_ENTITY_LABELS:
                 label = ent.label_
-                # Normalizaciones entre modelos
                 if label == "GPE":
                     label = "LOC"
                 if label in ("PER", "PRS"):
@@ -176,28 +202,25 @@ def ner(
                     label = "EVENT"
                 add_span(ent.start_char, ent.end_char, label, ent.text)
 
-    # ---- Números/fechas/porcentajes/divisas por regex ----
+    # ---- Numbers/dates/money/percent via regex ----
     if include_numbers:
-        for regex, rtype in REGEX_BY_LANG.get(req.lang, []):
+        for regex, rtype in REGEX_BY_LANG.get(lang, []):
             for m in regex.finditer(txt):
                 val = m.group(0)
 
-                 # --- filtro "solo ceros" robusto ---
+                # filter pure zeros
                 if rtype in ("NUMBER", "MONEY", "PERCENT"):
-                    # quita unidad monetaria o % al final (con posible espacio antes)
                     stripped = re.sub(r"\s*(€|eur|euros?|kr|sek|dkk|zł|pln|pln\.?)\s*$", "", val, flags=re.IGNORECASE)
                     stripped = re.sub(r"\s*%\s*$", "", stripped)
-                    # elimina espacios duros y separadores para evaluar el núcleo numérico
-                    core = stripped.replace("\u00A0", " ")  # NBSP -> espacio normal
+                    core = stripped.replace("\u00A0", " ")
                     core = core.replace(" ", "").replace(".", "").replace(",", "")
                     if re.fullmatch(r"0+", core or ""):
-                        # ej. "000", "000.000", "0 000,00", "000.000 kr", "0,00 %", etc.
                         continue
 
                 out_type = rtype if rtype in ("DATE", "TIME", "MONEY", "PERCENT") else "NUMBER"
                 add_span(m.start(), m.end(), out_type, val)
 
-    # ---- Agrupación por (texto, tipo) ----
+    # ---- Group by (text, type) ----
     groups: Dict[Tuple[str, str], Dict] = {}
     for s in spans:
         key = (s["text"], s["type"])
@@ -235,7 +258,9 @@ def ner(
         } for g in groups.values()]
 
     return {
-        "lang": req.lang.lower(),
+        "lang": lang,
+        "model": model_full_name,         # <<--- NUEVO
+        "model_version": model_version,   # <<--- opcional, útil para auditoría
         "summary": summary,
         "occurrences": occurrences
     }
@@ -248,3 +273,60 @@ def reset_models():
         _models.clear()
     import gc; gc.collect()
     return {"ok": True, "cleared": cnt}
+
+@app.get("/status")
+def status():
+    """
+    Métricas de sistema/proceso y estado de modelos (instalados vs cargados).
+    """
+    # --- Sistema ---
+    vm = psutil.virtual_memory()
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+
+    # --- Proceso actual ---
+    proc = psutil.Process(os.getpid())
+    with proc.oneshot():
+        rss_bytes = proc.memory_info().rss
+        threads = proc.num_threads()
+    uptime_sec = int(time.time() - START_TIME)
+
+    # --- Modelos cargados (detallado) ---
+    loaded = []
+    with _lock:
+        for lang_code, nlp in _models.items():
+            name, ver = resolved_model_name(nlp, lang_code)
+            loaded.append({"lang": lang_code, "model": name, "version": ver})
+        loaded_count = len(_models)
+
+    # --- Modelos instalados (por paquete) ---
+    installed = {}
+    for code, pkg in MODEL_BY_LANG.items():
+        try:
+            ver = pkg_version(pkg)
+            installed[code] = {"package": pkg, "installed": True, "version": ver}
+        except PackageNotFoundError:
+            installed[code] = {"package": pkg, "installed": False, "version": None}
+
+    return {
+        "ok": True,
+        "server": {
+            "pid": os.getpid(),
+            "uptime_sec": uptime_sec,
+            "threads": threads,
+            "spacy_version": spacy.__version__,
+        },
+        "system": {
+            "cpu_percent": cpu_percent,
+            "mem_total_mb": round(vm.total / (1024**2), 1),
+            "mem_used_mb": round((vm.total - vm.available) / (1024**2), 1),
+            "mem_percent": vm.percent,
+            "proc_rss_mb": round(rss_bytes / (1024**2), 1),
+        },
+        "models": {
+            "supported_langs": sorted(list(SUPPORTED_LANGS)),
+            "mapping": MODEL_BY_LANG,      # lang -> paquete esperado
+            "installed": installed,        # instalado o no + versión
+            "loaded_count": loaded_count,  # cuántos en RAM
+            "loaded": loaded,              # detalle de cargados
+        },
+    }
