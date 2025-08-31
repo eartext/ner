@@ -32,6 +32,46 @@ MODEL_BY_LANG: Dict[str, str] = {
 
 SUPPORTED_LANGS = set(MODEL_BY_LANG.keys())
 
+def _read_int(path: str) -> int:
+    try:
+        with open(path, "r") as f:
+            raw = f.read().strip()
+        if raw.lower() == "max":   # cgroup v2 “sin límite”
+            return -1
+        return int(raw)
+    except Exception:
+        return -2  # error
+
+def container_memory_info():
+    """
+    Devuelve dict con {limit_mb, usage_mb, percent} leyendo cgroups.
+    Soporta cgroup v2 (memory.max/current) y v1 (memory.limit_in_bytes/usage_in_bytes).
+    Si no se puede determinar, devuelve None.
+    """
+    # cgroup v2
+    lim = _read_int("/sys/fs/cgroup/memory.max")
+    use = _read_int("/sys/fs/cgroup/memory.current")
+    if lim != -2 and use != -2:
+        if lim > 0:  # hay límite explícito
+            limit_mb = round(lim / (1024**2), 1)
+            usage_mb = round(use / (1024**2), 1)
+            percent = round((use / lim) * 100, 1) if lim else None
+            return {"limit_mb": limit_mb, "usage_mb": usage_mb, "percent": percent}
+        # lim == -1 -> “max” (sin límite); seguimos intentando v1
+
+    # cgroup v1
+    lim = _read_int("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    use = _read_int("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if lim != -2 and use != -2:
+        # algunos hosts reportan un límite gigantesco (≈ no limitado)
+        if lim > 0 and lim < 1 << 60:  # descarta valores absurdamente grandes
+            limit_mb = round(lim / (1024**2), 1)
+            usage_mb = round(use / (1024**2), 1)
+            percent = round((use / lim) * 100, 1) if lim else None
+            return {"limit_mb": limit_mb, "usage_mb": usage_mb, "percent": percent}
+
+    return None
+
 def get_model(lang: str):
     lang = (lang or "").strip().lower()
     if lang not in SUPPORTED_LANGS:
@@ -278,10 +318,22 @@ def reset_models():
 def status():
     """
     Métricas de sistema/proceso y estado de modelos (instalados vs cargados).
+    Prioriza los límites de memoria del contenedor (cgroups) si están disponibles.
     """
-    # --- Sistema ---
+    # --- Sistema (usa memoria del contenedor si existe) ---
     vm = psutil.virtual_memory()
     cpu_percent = psutil.cpu_percent(interval=0.1)
+
+    cgroup_mem = container_memory_info()
+    if cgroup_mem:
+        mem_total_mb = cgroup_mem["limit_mb"]
+        mem_used_mb  = cgroup_mem["usage_mb"]
+        mem_percent  = cgroup_mem["percent"]
+    else:
+        # Fallback al host (menos preciso en PaaS)
+        mem_total_mb = round(vm.total / (1024**2), 1)
+        mem_used_mb  = round((vm.total - vm.available) / (1024**2), 1)
+        mem_percent  = vm.percent
 
     # --- Proceso actual ---
     proc = psutil.Process(os.getpid())
@@ -317,9 +369,9 @@ def status():
         },
         "system": {
             "cpu_percent": cpu_percent,
-            "mem_total_mb": round(vm.total / (1024**2), 1),
-            "mem_used_mb": round((vm.total - vm.available) / (1024**2), 1),
-            "mem_percent": vm.percent,
+            "mem_total_mb": mem_total_mb,
+            "mem_used_mb": mem_used_mb,
+            "mem_percent": mem_percent,
             "proc_rss_mb": round(rss_bytes / (1024**2), 1),
         },
         "models": {
