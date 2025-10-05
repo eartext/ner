@@ -170,6 +170,7 @@ def _compile_from_payload(payload: dict) -> Dict[str, List[Tuple[re.Pattern, str
                 prio  = int(r.get("priority", 2))
                 rid   = int(r.get("id", 0))  # <<-- conservamos ID
                 try:
+                    pat = pat.encode('utf-8').decode('unicode_escape')
                     rx = re.compile(pat, flags)
                     tmp.append((rx, str(typ).upper(), rid, prio))
                 except re.error:
