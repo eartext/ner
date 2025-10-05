@@ -37,7 +37,7 @@ SUPPORTED_LANGS = set(MODEL_BY_LANG.keys())
 # === Config remoto de regex
 CONFIG_URL = os.getenv(
     "REGEX_CONFIG_URL",
-    "https://media.isaacbaltanas.com/eartext/api/regex/config.php"
+    "https://media.isaacbaltanas.com/eartext/admin/regex/config.php"
 )
 CONFIG_TOKEN = os.getenv("REGEX_API_TOKEN", "")
 REGEX_TTL_SEC = int(os.getenv("REGEX_TTL_SEC", "60"))
