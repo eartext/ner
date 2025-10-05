@@ -3,73 +3,72 @@ from pydantic import BaseModel
 import spacy
 import threading
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Set, Optional
 
 import os
 import time
 import psutil
+import json
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 
 app = FastAPI(title="Eartext NER")
 START_TIME = time.time()
+
 # ===== Model cache (thread-safe) =====
 _models: Dict[str, "spacy.Language"] = {}
 _lock = threading.Lock()
 
 # === spaCy model per language (must be installed in the environment) ===
 MODEL_BY_LANG: Dict[str, str] = {
-    "es": "es_core_news_lg",  # Español
-    "sv": "sv_core_news_lg",  # Sueco
-    "da": "da_core_news_lg",  # Danés
-    "fi": "fi_core_news_lg",  # Finés
-    "en": "en_core_web_lg",   # Inglés
-    "nl": "nl_core_news_lg",  # Neerlandés
-    "pl": "pl_core_news_sm",  # Polaco (no hay lg oficial)
-    "pt": "pt_core_news_lg",  # Portugués (Brasil)
-    # Si añades más, inclúyelos aquí y, si quieres, añade regex abajo.
+    "es": "es_core_news_lg",
+    "sv": "sv_core_news_lg",
+    "da": "da_core_news_lg",
+    "fi": "fi_core_news_lg",
+    "en": "en_core_web_lg",
+    "nl": "nl_core_news_lg",
+    "pl": "pl_core_news_sm",
+    "pt": "pt_core_news_lg",
 }
-
 SUPPORTED_LANGS = set(MODEL_BY_LANG.keys())
+
+# === Config remoto de regex
+CONFIG_URL = os.getenv(
+    "REGEX_CONFIG_URL",
+    "https://media.isaacbaltanas.com/eartext/api/regex/config.php"
+)
+CONFIG_TOKEN = os.getenv("REGEX_API_TOKEN", "")
+REGEX_TTL_SEC = int(os.getenv("REGEX_TTL_SEC", "60"))
 
 def _read_int(path: str) -> int:
     try:
         with open(path, "r") as f:
             raw = f.read().strip()
-        if raw.lower() == "max":   # cgroup v2 “sin límite”
+        if raw.lower() == "max":
             return -1
         return int(raw)
     except Exception:
-        return -2  # error
+        return -2
 
 def container_memory_info():
-    """
-    Devuelve dict con {limit_mb, usage_mb, percent} leyendo cgroups.
-    Soporta cgroup v2 (memory.max/current) y v1 (memory.limit_in_bytes/usage_in_bytes).
-    Si no se puede determinar, devuelve None.
-    """
-    # cgroup v2
     lim = _read_int("/sys/fs/cgroup/memory.max")
     use = _read_int("/sys/fs/cgroup/memory.current")
     if lim != -2 and use != -2:
-        if lim > 0:  # hay límite explícito
+        if lim > 0:
             limit_mb = round(lim / (1024**2), 1)
             usage_mb = round(use / (1024**2), 1)
             percent = round((use / lim) * 100, 1) if lim else None
             return {"limit_mb": limit_mb, "usage_mb": usage_mb, "percent": percent}
-        # lim == -1 -> “max” (sin límite); seguimos intentando v1
-
-    # cgroup v1
     lim = _read_int("/sys/fs/cgroup/memory/memory.limit_in_bytes")
     use = _read_int("/sys/fs/cgroup/memory/memory.usage_in_bytes")
     if lim != -2 and use != -2:
-        # algunos hosts reportan un límite gigantesco (≈ no limitado)
-        if lim > 0 and lim < 1 << 60:  # descarta valores absurdamente grandes
+        if lim > 0 and lim < 1 << 60:
             limit_mb = round(lim / (1024**2), 1)
             usage_mb = round(use / (1024**2), 1)
             percent = round((use / lim) * 100, 1) if lim else None
             return {"limit_mb": limit_mb, "usage_mb": usage_mb, "percent": percent}
-
     return None
 
 def get_model(lang: str):
@@ -88,100 +87,170 @@ def get_model(lang: str):
     return _models[lang]
 
 def resolved_model_name(nlp: "spacy.Language", lang: str) -> Tuple[str, str]:
-    """
-    Devuelve (model_full_name, model_version).
-    Intenta construir p.ej. 'es_core_news_lg' desde meta+lang;
-    si no puede, cae al nombre del mapping (MODEL_BY_LANG[lang]).
-    """
     try:
         meta = getattr(nlp, "meta", {}) or {}
-        pkg_name = meta.get("name")  # suele ser 'core_news_lg'
+        pkg_name = meta.get("name")
         version = meta.get("version") or ""
         lang_code = getattr(nlp, "lang", None) or lang
         if pkg_name and lang_code:
             return f"{lang_code}_{pkg_name}", version
     except Exception:
         pass
-    # Fallback: lo que cargamos desde el mapping
     return MODEL_BY_LANG.get(lang, f"{lang}_unknown"), ""
 
 class NerRequest(BaseModel):
     text: str
-    lang: str  # e.g. "es" | "sv" | "da" | "fi" | "en" | "nl" | "pl"
+    lang: str
 
 def cut_excerpt(txt: str, start: int, end: int, win: int = 100) -> Tuple[str, str, str]:
     s = max(0, start - win)
     e = min(len(txt), end + win)
-    pre  = txt[s:start]
-    mid  = txt[start:end]
-    post = txt[end:e]
-    return pre, mid, post
+    return txt[s:start], txt[start:end], txt[end:e]
 
-# ===== Entity labels we keep (normalized across models) =====
 NAMED_ENTITY_LABELS = (
     "PERSON","ORG","GPE","LOC","NORP","FAC","WORK_OF_ART","EVENT",
     "PRODUCT","LANGUAGE","PER","PRS","TME","MSR","EVN","WRK","OBJ"
 )
 
-# ===== Regex per language (DATE, TIME, MONEY, PERCENT, NUMBER) =====
-REGEX_BY_LANG = {
-    "es": [
-        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\s+de\s+[A-Za-záéíóúñ]+\s+\d{4}\b", re.IGNORECASE), "DATE"),
-        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:€|eur|euros?)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
-    ],
-    "sv": [
-        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|SEK)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
-    ],
-    "da": [
-        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zæøåÆØÅ]+\s+\d{4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:kr|DKK)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
-    ],
-    "fi": [
-        (re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\.\s+[A-Za-zäöÄÖ]+\s+\d{4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*€\b"), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*€\b"), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
-    ],
-    "pl": [
-        (re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}\s+[A-Za-ząćęłńóśźżĄĆĘŁŃÓŚŹŻ]+\s+\d{4}\b"), "DATE"),
-        (re.compile(r"\b\d{1,2}:\d{2}\b"), "TIME"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:zł|PLN)\b", re.IGNORECASE), "MONEY"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\s*%\b"), "PERCENT"),
-        (re.compile(r"\b\d{1,3}(?:\.(?:\s)?\d{3})+(?:[.,]\d+)?\b"), "NUMBER"),
-        (re.compile(r"\b\d+(?:[.,]\d+)?\b"), "NUMBER"),
-    ],
-}
+# === Normalizador de tipos venidos del Regex Manager ===
+def normalize_regex_type(rtype: str) -> str:
+    t = (rtype or "").strip().upper()
+
+    # Nombres propios
+    if t in {"NAME", "PROPER_NAME", "PROPN", "PERSON"}:
+        return "PERSON"
+
+    # Mapeos a etiquetas spaCy
+    if t in {"GPE"}:
+        return "LOC"
+    if t in {"ORGANIZATION"}:
+        return "ORG"
+    if t in {"WORK", "WORK_OF_ART", "WRK"}:
+        return "WORK_OF_ART"
+    if t in {"EVN"}:
+        return "EVENT"
+
+    # Tipos numéricos / temporales
+    if t in {"DATE", "TIME", "MONEY", "PERCENT", "NUMBER"}:
+        return t
+
+    # Desconocido -> NUMBER (seguro)
+    return "NUMBER"
+
+# ===== Caché de regex dinámica (con IDs) =====
+# Estructura compilada: { lang: [ (compiled_regex, TYPE, rule_id), ... ] }
+_regex_cache_by_lang: Dict[str, List[Tuple[re.Pattern, str, int]]] = {}
+_regex_last_fetch = 0.0
+_regex_lock = threading.Lock()
+_regex_source = "none"  # "config" si viene del PHP; "none" si no hay reglas (sin fallback)
+
+def _flags_from_string(fs: str) -> int:
+    fs = (fs or "").lower()
+    f = 0
+    if "i" in fs: f |= re.IGNORECASE
+    if "m" in fs: f |= re.MULTILINE
+    if "s" in fs: f |= re.DOTALL
+    if "x" in fs: f |= re.VERBOSE
+    return f
+
+def _compile_from_payload(payload: dict) -> Dict[str, List[Tuple[re.Pattern, str, int]]]:
+    out: Dict[str, List[Tuple[re.Pattern, str, int]]] = {}
+    for lang, by_type in (payload or {}).items():
+        tmp: List[Tuple[re.Pattern, str, int, int]] = []
+        if not isinstance(by_type, dict):
+            continue
+        for typ, rules in by_type.items():
+            if not isinstance(rules, list):
+                continue
+            for r in rules:
+                if not r or not r.get("enabled", True):
+                    continue
+                pat   = r.get("pattern", "")
+                flags = _flags_from_string(r.get("flags", ""))
+                prio  = int(r.get("priority", 2))
+                rid   = int(r.get("id", 0))  # <<-- conservamos ID
+                try:
+                    rx = re.compile(pat, flags)
+                    tmp.append((rx, str(typ).upper(), rid, prio))
+                except re.error:
+                    continue
+        tmp.sort(key=lambda t: t[3])  # por prioridad
+        out[lang.lower()] = [(rx, typ, rid) for (rx, typ, rid, _p) in tmp]
+    return out
+
+def _fetch_and_compile_regex():
+    global _regex_cache_by_lang, _regex_last_fetch, _regex_source
+    url = CONFIG_URL
+    if CONFIG_TOKEN:
+        sep = "&" if ("?" in url) else "?"
+        url = f"{url}{sep}token={CONFIG_TOKEN}"
+    req = Request(url, headers={"User-Agent": "Eartext-NER/1.0"})
+    with urlopen(req, timeout=6) as r:
+        data = r.read()
+    payload = json.loads(data.decode("utf-8", errors="replace"))
+    compiled = _compile_from_payload(payload)
+
+    # Marca el fetch para no martillear el endpoint
+    _regex_last_fetch = time.time()
+
+    if compiled:
+        _regex_cache_by_lang = compiled
+        _regex_source = "config"
+    else:
+        # Respuesta válida pero sin reglas -> spaCy only
+        _regex_cache_by_lang = {}
+        _regex_source = "none"
+
+def _ensure_regex_loaded():
+    global _regex_cache_by_lang, _regex_last_fetch, _regex_source
+    with _regex_lock:
+        need = (time.time() - _regex_last_fetch) > REGEX_TTL_SEC
+        if not _regex_cache_by_lang or need:
+            try:
+                _fetch_and_compile_regex()
+            except (URLError, HTTPError, ValueError, json.JSONDecodeError):
+                # Sin fallback: cache vacío, fuente "none", y ponemos last_fetch ahora.
+                _regex_cache_by_lang = {}
+                _regex_last_fetch = time.time()
+                _regex_source = "none"
+
+def get_compiled_regex(lang: str) -> Tuple[List[Tuple[re.Pattern, str, int]], str, int]:
+    """
+    Devuelve (lista_compilada, source, available_count)
+    source = "config" | "none"
+    """
+    _ensure_regex_loaded()
+    lang = (lang or "").lower()
+    lst = _regex_cache_by_lang.get(lang, [])
+    return lst, _regex_source, len(lst)
+
+# ---------- Utilidades de origen ----------
+def _format_source_tag(src_spacy: bool, regex_ids: Set[int]) -> str:
+    """
+    Compacta el origen para columna estrecha:
+      - Solo spaCy  -> 'S'
+      - Solo Regex  -> 'R#n' (o 'R#n+K' si varias)
+      - Ambos       -> 'S+R#n'  **(siempre con el id de regex más bajo)**
+    """
+    has_r = bool(regex_ids)
+    if src_spacy and has_r:
+        ids_sorted = sorted([i for i in regex_ids if i > 0]) or [0]
+        return f"S+R#{ids_sorted[0]}"
+    if src_spacy:
+        return "S"
+    if has_r:
+        ids_sorted = sorted([i for i in regex_ids if i > 0]) or [0]
+        first = ids_sorted[0]
+        rest = len(ids_sorted) - 1
+        return f"R#{first}" if rest == 0 else f"R#{first}+{rest}"
+    return ""
 
 @app.post("/ner")
 def ner(
     req: NerRequest,
-    include_words: bool = Query(True, description="Include named entities (PERSON, ORG, etc.)"),
-    include_numbers: bool = Query(True, description="Include numbers/dates/amounts via regex"),
+    include_words: bool = Query(True, description="Use spaCy NER (PERSON, ORG, LOC, etc.)"),
+    include_regex: bool = Query(True, description="Use Regex Manager rules (dates, numbers, names, etc.)"),
+    include_numbers: bool = Query(None, description="DEPRECATED: use include_regex"),
     include_all: bool = Query(False, description="Include all occurrences per term"),
 ):
     txt = (req.text or "").strip()
@@ -193,63 +262,85 @@ def ner(
     model_full_name, model_version = resolved_model_name(nlp, lang)
     doc = nlp(txt)
 
-    spans: List[Dict] = []
+    # Back-compat con clientes antiguos:
+    do_regex = include_regex if include_numbers is None else bool(include_numbers)
 
-    # --- priority for overlap resolution ---
-    PRIORITY = {"MONEY": 3, "DATE": 3, "TIME": 3, "PERCENT": 3, "NUMBER": 1}
+    spans: List[Dict[str, Any]] = []
+
+    PRIORITY = {
+        "MONEY": 3, "DATE": 3, "TIME": 3, "PERCENT": 3,
+        "PERSON": 2, "ORG": 2, "LOC": 2, "WORK_OF_ART": 2, "EVENT": 2,
+        "NUMBER": 1
+    }
     def _prio(t: str) -> int:
-        return PRIORITY.get(t, 2)  # NER words -> 2
+        return PRIORITY.get(t, 2)
 
-    def add_span(start: int, end: int, typ: str, text: str):
+
+
+    def _merge_sources(dst: Dict[str, Any], src_spacy: bool, src_regex_id: Optional[int]):
+        if src_spacy:
+            dst["src_spacy"] = True
+        if src_regex_id is not None:
+            dst["src_regex_ids"].add(int(src_regex_id))
+
+    def add_span(start: int, end: int, typ: str, text: str, *, src_spacy: bool = False, src_regex_id: Optional[int] = None):
+        # Estructura extendida con fuentes
+        new_span = {"text": text, "type": typ, "start": start, "end": end, "src_spacy": False, "src_regex_ids": set()}  # type: ignore
+        _merge_sources(new_span, src_spacy, src_regex_id)
+
         i = 0
         while i < len(spans):
             s = spans[i]
             a, b = start, end
             c, d = s["start"], s["end"]
-
             overlap = not (b <= c or a >= d)
             if overlap:
                 p_new = _prio(typ)
                 p_old = _prio(s["type"])
-
                 replace = False
-                if p_new > p_old:
-                    replace = True
-                elif p_new == p_old and (end - start) > (d - c):
-                    replace = True
+                if p_new > p_old: replace = True
+                elif p_new == p_old and (end - start) > (d - c): replace = True
 
                 if replace:
+                    # Fusiona origen antes de reemplazar
+                    _merge_sources(new_span, s.get("src_spacy", False), None)
+                    for rid in s.get("src_regex_ids", set()):
+                        _merge_sources(new_span, False, rid)
                     spans.pop(i)
                     continue
                 else:
+                    # Conserva s y añade el origen del nuevo span a s
+                    _merge_sources(s, src_spacy, src_regex_id)
                     return
             i += 1
 
-        spans.append({"text": text, "type": typ, "start": start, "end": end})
+        spans.append(new_span)
 
-    # ---- NER entities ----
+    # ---- NER entities (spaCy) ----
     if include_words:
         for ent in doc.ents:
             if ent.label_ in NAMED_ENTITY_LABELS:
                 label = ent.label_
-                if label == "GPE":
-                    label = "LOC"
-                if label in ("PER", "PRS"):
-                    label = "PERSON"
-                if label == "WRK":
-                    label = "WORK_OF_ART"
-                if label == "EVN":
-                    label = "EVENT"
-                add_span(ent.start_char, ent.end_char, label, ent.text)
+                if label == "GPE": label = "LOC"
+                if label in ("PER", "PRS"): label = "PERSON"
+                if label == "WRK": label = "WORK_OF_ART"
+                if label == "EVN": label = "EVENT"
+                add_span(ent.start_char, ent.end_char, label, ent.text, src_spacy=True)
 
-    # ---- Numbers/dates/money/percent via regex ----
-    if include_numbers:
-        for regex, rtype in REGEX_BY_LANG.get(lang, []):
-            for m in regex.finditer(txt):
+    # ---- Regex entities (con IDs y metadatos) ----
+    used_rule_ids: Set[int] = set()
+    regex_source = "none"
+    available_rules = 0
+
+    if do_regex:
+        compiled_list, regex_source, available_rules = get_compiled_regex(lang)
+        for rx, rtype_raw, rid in compiled_list:
+            out_type = normalize_regex_type(rtype_raw)
+            for m in rx.finditer(txt):
                 val = m.group(0)
 
-                # filter pure zeros
-                if rtype in ("NUMBER", "MONEY", "PERCENT"):
+                # Higiene solo para tipos numéricos
+                if out_type in ("NUMBER", "MONEY", "PERCENT"):
                     stripped = re.sub(r"\s*(€|eur|euros?|kr|sek|dkk|zł|pln|pln\.?)\s*$", "", val, flags=re.IGNORECASE)
                     stripped = re.sub(r"\s*%\s*$", "", stripped)
                     core = stripped.replace("\u00A0", " ")
@@ -257,10 +348,11 @@ def ner(
                     if re.fullmatch(r"0+", core or ""):
                         continue
 
-                out_type = rtype if rtype in ("DATE", "TIME", "MONEY", "PERCENT") else "NUMBER"
-                add_span(m.start(), m.end(), out_type, val)
+                add_span(m.start(), m.end(), out_type, val, src_regex_id=rid)
+                if rid:
+                    used_rule_ids.add(int(rid))
 
-    # ---- Group by (text, type) ----
+    # ---- Agrupar por (text, type) ----
     groups: Dict[Tuple[str, str], Dict] = {}
     for s in spans:
         key = (s["text"], s["type"])
@@ -271,36 +363,59 @@ def ner(
                 "type": s["type"],
                 "count": 0,
                 "first_excerpt": {"pre": pre, "match": mid, "post": post},
-                "occurrences": []
+                "occurrences": [],
+                "src_spacy": False,
+                "src_regex_ids": set(),  # set[int]
             }
         groups[key]["count"] += 1
-        if include_all:
+        # Propaga origen al grupo
+        if s.get("src_spacy", False):
+            groups[key]["src_spacy"] = True
+        for rid in s.get("src_regex_ids", set()):
+            groups[key]["src_regex_ids"].add(int(rid))
+
+    if include_all:
+        for s in spans:
             pre, mid, post = cut_excerpt(txt, s["start"], s["end"], win=100)
-            groups[key]["occurrences"].append({
-                "start": s["start"], "end": s["end"],
-                "pre": pre, "match": mid, "post": post
+            groups[(s["text"], s["type"])]["occurrences"].append({
+                "start": s["start"], "end": s["end"], "pre": pre, "match": mid, "post": post
             })
 
-    summary = [{
-        "text": g["text"],
-        "type": g["type"],
-        "count": g["count"],
-        "excerpt": g["first_excerpt"]
-    } for g in groups.values()]
+    # Construye summary con tag de origen compacto
+    summary = []
+    for g in groups.values():
+        source_tag = _format_source_tag(bool(g["src_spacy"]), set(g["src_regex_ids"]))
+        summary.append({
+            "text": g["text"],
+            "type": g["type"],
+            "count": g["count"],
+            "source": source_tag,                 # 'S', 'R#n'/'R#n+K' o 'S+R#n'
+            "excerpt": g["first_excerpt"]
+        })
     summary.sort(key=lambda x: x["count"], reverse=True)
 
     occurrences = []
     if include_all:
-        occurrences = [{
-            "text": g["text"],
-            "type": g["type"],
-            "occurrences": g["occurrences"]
-        } for g in groups.values()]
+        for g in groups.values():
+            occurrences.append({
+                "text": g["text"],
+                "type": g["type"],
+                "occurrences": g["occurrences"]
+            })
+
+    # --- Bloque de metadatos de regex ---
+    regex_meta = {
+        "source": regex_source,  # "config" -> Curated ; "none" -> no regex rules
+        "used_rule_ids": sorted(list(used_rule_ids)),
+        "used_rule_count": len(used_rule_ids),
+        "available_rule_count": int(available_rules),
+    }
 
     return {
         "lang": lang,
-        "model": model_full_name,         # <<--- NUEVO
-        "model_version": model_version,   # <<--- opcional, útil para auditoría
+        "model": model_full_name,
+        "model_version": model_version,
+        "regex": regex_meta,
         "summary": summary,
         "occurrences": occurrences
     }
@@ -314,35 +429,33 @@ def reset_models():
     import gc; gc.collect()
     return {"ok": True, "cleared": cnt}
 
+@app.post("/regex/reload")
+def reload_regex():
+    global _regex_last_fetch
+    with _regex_lock:
+        _regex_last_fetch = 0.0
+    return {"ok": True, "message": "Regex cache will refresh on next request"}
+
 @app.get("/status")
 def status():
-    """
-    Métricas de sistema/proceso y estado de modelos (instalados vs cargados).
-    Prioriza los límites de memoria del contenedor (cgroups) si están disponibles.
-    """
-    # --- Sistema (usa memoria del contenedor si existe) ---
     vm = psutil.virtual_memory()
     cpu_percent = psutil.cpu_percent(interval=0.1)
-
     cgroup_mem = container_memory_info()
     if cgroup_mem:
         mem_total_mb = cgroup_mem["limit_mb"]
         mem_used_mb  = cgroup_mem["usage_mb"]
         mem_percent  = cgroup_mem["percent"]
     else:
-        # Fallback al host (menos preciso en PaaS)
         mem_total_mb = round(vm.total / (1024**2), 1)
         mem_used_mb  = round((vm.total - vm.available) / (1024**2), 1)
         mem_percent  = vm.percent
 
-    # --- Proceso actual ---
     proc = psutil.Process(os.getpid())
     with proc.oneshot():
         rss_bytes = proc.memory_info().rss
         threads = proc.num_threads()
     uptime_sec = int(time.time() - START_TIME)
 
-    # --- Modelos cargados (detallado) ---
     loaded = []
     with _lock:
         for lang_code, nlp in _models.items():
@@ -350,7 +463,6 @@ def status():
             loaded.append({"lang": lang_code, "model": name, "version": ver})
         loaded_count = len(_models)
 
-    # --- Modelos instalados (por paquete) ---
     installed = {}
     for code, pkg in MODEL_BY_LANG.items():
         try:
@@ -358,6 +470,14 @@ def status():
             installed[code] = {"package": pkg, "installed": True, "version": ver}
         except PackageNotFoundError:
             installed[code] = {"package": pkg, "installed": False, "version": None}
+
+    regex_cache_state = {
+        "config_url": CONFIG_URL,
+        "ttl_sec": REGEX_TTL_SEC,
+        "last_fetch_age_sec": None if _regex_last_fetch == 0 else int(time.time() - _regex_last_fetch),
+        "langs_cached": sorted(list(_regex_cache_by_lang.keys())),
+        "source": _regex_source,  # "config" or "none"
+    }
 
     return {
         "ok": True,
@@ -376,9 +496,10 @@ def status():
         },
         "models": {
             "supported_langs": sorted(list(SUPPORTED_LANGS)),
-            "mapping": MODEL_BY_LANG,      # lang -> paquete esperado
-            "installed": installed,        # instalado o no + versión
-            "loaded_count": loaded_count,  # cuántos en RAM
-            "loaded": loaded,              # detalle de cargados
+            "mapping": MODEL_BY_LANG,
+            "installed": installed,
+            "loaded_count": loaded_count,
+            "loaded": loaded,
         },
+        "regex_cache": regex_cache_state,
     }
