@@ -153,10 +153,20 @@ def _flags_from_string(fs: str) -> int:
     if "x" in fs: f |= re.VERBOSE
     return f
 
+dimport re
+
+def _materialize_unicode_escapes(p: str) -> str:
+    # Sustituye solo los escapes Unicode realmente necesarios
+    # y evita tocar \b, \t, \n, etc.
+    p = p.replace(r"\u00A0", "\u00A0")  # NBSP
+    p = p.replace(r"\u202F", "\u202F")  # NNBSP
+    return p
+
+
 def _compile_from_payload(payload: dict) -> Dict[str, List[Tuple[re.Pattern, str, int]]]:
-    out: Dict[str, List[Tuple[re.Pattern, str, int]]] = {}
+    out = {}
     for lang, by_type in (payload or {}).items():
-        tmp: List[Tuple[re.Pattern, str, int, int]] = []
+        tmp = []
         if not isinstance(by_type, dict):
             continue
         for typ, rules in by_type.items():
@@ -168,14 +178,16 @@ def _compile_from_payload(payload: dict) -> Dict[str, List[Tuple[re.Pattern, str
                 pat   = r.get("pattern", "")
                 flags = _flags_from_string(r.get("flags", ""))
                 prio  = int(r.get("priority", 2))
-                rid   = int(r.get("id", 0))  # <<-- conservamos ID
+                rid   = int(r.get("id", 0))
+
                 try:
-                    pat = pat.encode('utf-8').decode('unicode_escape')
+                    # solo materializa los \uXXXX importantes
+                    pat = _materialize_unicode_escapes(pat)
                     rx = re.compile(pat, flags)
                     tmp.append((rx, str(typ).upper(), rid, prio))
                 except re.error:
                     continue
-        tmp.sort(key=lambda t: t[3])  # por prioridad
+        tmp.sort(key=lambda t: t[3])  # orden por prioridad
         out[lang.lower()] = [(rx, typ, rid) for (rx, typ, rid, _p) in tmp]
     return out
 
