@@ -153,8 +153,6 @@ def _flags_from_string(fs: str) -> int:
     if "x" in fs: f |= re.VERBOSE
     return f
 
-dimport re
-
 def _materialize_unicode_escapes(p: str) -> str:
     # Sustituye solo los escapes Unicode realmente necesarios
     # y evita tocar \b, \t, \n, etc.
